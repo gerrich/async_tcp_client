@@ -5,17 +5,13 @@ from tornado import ioloop
 from tornado import iostream
 import socket
 
-task_list = []
-for i in xrange(10):
-  task_list.append(["ya.ru", 80])
-
-task_count = len(task_list)
-ok_counter = 0
 
 class MyStream(iostream.IOStream):
-  def __init__(self, sock, data):
+  def __init__(self, id, pool, sock, data):
     iostream.IOStream.__init__(self, sock)
     self.__data = data
+    self.__pool = pool
+    self.__id = id
   
   def send_request(self):
       self.write(self.__data) 
@@ -30,32 +26,76 @@ class MyStream(iostream.IOStream):
       self.read_bytes(int(headers["Content-Length"]), self.on_body)
   
   def on_body(self, data):
-    global ok_counter
-    ok_counter += 1  
-    print "len(data): ",len(data)
+    self.__pool.count_ok()
+    self.__pool.on_body(self.__id, data)
 
 
+class parallel_tcp_client:
+  def count_ok(self):
+    self.__ok_counter += 1
 
-
-def register_call(host, port):
-  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-  stream = MyStream(s, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n"%host)
+  def register_call_t(self, id,  task):
+    data = None
+    if len(task) > 2:
+      data = task[2]
+    on_body = None
+    if len(task) > 3:
+      on_body = task[3]
     
-  #stream = iostream.IOStream(s)
-  stream.set_close_callback(close_callback)
-  stream.connect((host, port), stream.send_request)
+    self.register_call(id, task[0], task[1], data)
+  
+  def register_call(self, id, host, port, data = None):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+    stream = MyStream(id, self, s, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n"%host)
 
-def close_callback():
-    print "closed"
-    if ok_counter == task_count:
-      ioloop.IOLoop.instance().stop()
-    elif len(task_list):
-      task = task_list.pop()
-      register_call(task[0], task[1])
-      
+    stream.set_close_callback(self.close_callback)
+    stream.connect((host, port), stream.send_request)
 
-for i in xrange(5):
-  task = task_list.pop()
-  register_call(task[0], task[1])
+  def close_callback(self):
+      if self.__ok_counter == self.__task_count:
+        ioloop.IOLoop.instance().stop()
+      elif len(self.__task_list):
+        id = self.__task_count - len(self.__task_list)
+        task = self.__task_list.pop()
+        self.register_call_t(id, task)
+  
+  def on_body(self, id, data):
+    self.__on_body(id, data)      
 
-ioloop.IOLoop.instance().start()
+  def __init__(self, task_list, concurency, _on_body):
+    self.__task_list = task_list
+    self.__ok_counter = 0
+    self.__task_count = len(self.__task_list)
+    self.__on_body = _on_body
+    for i in xrange(concurency):
+      task = self.__task_list.pop()
+      self.register_call_t(i, task)
+      if len(self.__task_list) == 0:
+        break
+
+    ioloop.IOLoop.instance().start()
+
+def ask_parallel(task_list, concurency, _on_body = None):
+  pclient = parallel_tcp_client(task_list, concurency, _on_body) 
+
+
+def map_parallel(task_list, concurency=5):
+  result = [None] * len(task_list)
+  def _register_result(id, data):
+    result_list[id] = data
+
+  pclient = parallel_tcp_client(task_list, concurency, _register_result)
+
+if __name__ == "__main__":
+  task_list = []
+  for i in xrange(10):
+    task_list.append(["ya.ru", 80, "GET / HTTP/1.0\r\nHost: %s\r\n\r\n"%"ya.ru"])
+
+  def print_page(id, data):
+    print "task_id: %d, data_len: %d"%(id, len(data))
+  
+  ask_parallel(task_list, 20, print_page)
+
+
+
+
